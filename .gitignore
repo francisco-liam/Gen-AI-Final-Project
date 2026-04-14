@@ -1,0 +1,18 @@
+# Virtual environment
+venv/
+
+# Downloaded dataset
+data/
+
+# Model checkpoints
+checkpoints/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Jupyter notebooks (if added later)
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
