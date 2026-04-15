@@ -1,16 +1,19 @@
 """
-sample.py — Week 2 inference script for the trained DDPM
+sample.py — DDPM inference script  (Weeks 2-3)
 
-Loads a checkpoint produced by train.py, runs the full DDPM reverse
+Loads a checkpoint produced by train.py, reconstructs the exact noise
+schedule used during training (linear or cosine), runs the full DDPM reverse
 diffusion loop, and saves a grid of generated Fashion-MNIST images.
 
 Usage:
-    python sample.py                          # uses latest checkpoint
-    python sample.py --ckpt checkpoints/ckpt_epoch0010.pt
+    # Point at any checkpoint — schedule is read from its embedded config
+    python sample.py --ckpt experiments/linear/run_01/checkpoints/ckpt_epoch0010.pt
+    python sample.py --ckpt experiments/cosine/run_01/checkpoints/ckpt_epoch0010.pt
 
-Outputs:
-    outputs/samples_epoch0010.png   — grid of generated images
-    outputs/trajectory_epoch0010.png — optional denoising timeline
+Outputs land next to the checkpoint's run folder:
+    experiments/<schedule>/<run>/samples/samples_epoch0010.png
+    experiments/<schedule>/<run>/samples/samples_latest.png
+    experiments/<schedule>/<run>/samples/trajectory_epoch0010.png
 """
 
 import argparse
@@ -21,20 +24,19 @@ import torchvision.utils as vutils
 
 from diffusion import GaussianDiffusion
 from model     import SmallUNet
-from schedule  import linear_beta_schedule
+from schedule  import get_beta_schedule
 
 
 # ===========================================================================
-# Configuration — edit these or override via CLI arguments
+# Configuration — all overridable via CLI
 # ===========================================================================
 
-CHECKPOINT_PATH = "checkpoints/ckpt_epoch0010.pt"  # which checkpoint to load
+CHECKPOINT_PATH = "experiments/linear/run_01/checkpoints/ckpt_epoch0010.pt"
 NUM_SAMPLES     = 16        # how many images to generate (keep a perfect square)
-TIMESTEPS       = 200       # must match the value used during training
-OUTPUT_DIR      = "outputs" # where to write PNG grids
 GRID_NROW       = 4         # images per row in the output grid
 SAVE_TRAJECTORY = True      # also save a denoising timeline strip
 TRAJ_EVERY      = 20        # snapshot every N denoising steps for trajectory
+# OUTPUT_DIR is derived from the checkpoint path automatically (see _output_dir).
 
 
 # ===========================================================================
@@ -77,13 +79,35 @@ def build_model_from_checkpoint(ckpt: dict, device: torch.device) -> SmallUNet:
 
 def build_diffusion(ckpt: dict) -> GaussianDiffusion:
     """
-    Rebuild the GaussianDiffusion object using the same timestep count
-    that was used during training (stored in the checkpoint config).
+    Rebuild the GaussianDiffusion object using the schedule name and timestep
+    count stored in the checkpoint config.
+
+    This means sampling always uses the SAME schedule as training, regardless
+    of which schedule flag is passed on the command line.
     """
-    cfg = ckpt.get("config", {})
-    timesteps = cfg.get("timesteps", TIMESTEPS)
-    betas     = linear_beta_schedule(timesteps)
+    cfg       = ckpt.get("config", {})
+    schedule  = cfg.get("schedule",  "linear")   # Week 3: read from config
+    timesteps = cfg.get("timesteps", 200)
+    betas     = get_beta_schedule(schedule, timesteps)
     return GaussianDiffusion(betas)
+
+
+def _output_dir(checkpoint_path: str) -> str:
+    """
+    Derive the output folder from the checkpoint path so images land next to
+    the run that produced them.
+
+    experiments/linear/run_01/checkpoints/ckpt_epoch0010.pt
+        → experiments/linear/run_01/samples/
+
+    Falls back to 'outputs/' for legacy checkpoints not in that tree.
+    """
+    # Walk up from <run_dir>/checkpoints/  →  <run_dir>/samples/
+    ckpt_dir = os.path.dirname(os.path.abspath(checkpoint_path))
+    run_dir  = os.path.dirname(ckpt_dir)
+    if os.path.basename(ckpt_dir) == "checkpoints":
+        return os.path.join(run_dir, "samples")
+    return "outputs"
 
 
 def save_image_grid(
@@ -149,14 +173,16 @@ def generate(checkpoint_path: str) -> None:
     ckpt = load_checkpoint(checkpoint_path, device)
     epoch = ckpt.get("epoch", "?")
     loss  = ckpt.get("loss",  float("nan"))
-    print(f"  Epoch {epoch}  |  training loss: {loss:.4f}")
+    cfg   = ckpt.get("config", {})
+    schedule = cfg.get("schedule", "linear")
+    print(f"  Epoch {epoch}  |  schedule: {schedule}  |  training loss: {loss:.4f}")
 
     # ── Rebuild model ─────────────────────────────────────────────────────
     model = build_model_from_checkpoint(ckpt, device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {total_params:,}")
 
-    # ── Rebuild diffusion (must use the same schedule as training) ────────
+    # ── Rebuild diffusion using the schedule stored in the checkpoint ─────
     diffusion = build_diffusion(ckpt)
 
     # Move all precomputed tensors to device so _gather's .to() is a no-op
@@ -176,8 +202,9 @@ def generate(checkpoint_path: str) -> None:
     # ── Generate samples ──────────────────────────────────────────────────
     print(f"Generating {NUM_SAMPLES} samples with T={diffusion.T} denoising steps …")
 
-    epoch_tag = f"epoch{epoch:04d}" if isinstance(epoch, int) else str(epoch)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    epoch_tag  = f"epoch{epoch:04d}" if isinstance(epoch, int) else str(epoch)
+    output_dir = _output_dir(checkpoint_path)
+    os.makedirs(output_dir, exist_ok=True)
 
     if SAVE_TRAJECTORY:
         # sample_with_trajectory returns both final images and snapshots
@@ -194,15 +221,15 @@ def generate(checkpoint_path: str) -> None:
     # ── Save outputs ──────────────────────────────────────────────────────
     samples_cpu = samples.cpu()
 
-    grid_path = os.path.join(OUTPUT_DIR, f"samples_{epoch_tag}.png")
+    grid_path = os.path.join(output_dir, f"samples_{epoch_tag}.png")
     save_image_grid(samples_cpu, grid_path, nrow=GRID_NROW)
 
     # Always write a "latest" alias so external scripts have a stable path
-    latest_path = os.path.join(OUTPUT_DIR, "samples_latest.png")
+    latest_path = os.path.join(output_dir, "samples_latest.png")
     save_image_grid(samples_cpu, latest_path, nrow=GRID_NROW)
 
     if SAVE_TRAJECTORY and trajectory:
-        traj_path = os.path.join(OUTPUT_DIR, f"trajectory_{epoch_tag}.png")
+        traj_path = os.path.join(output_dir, f"trajectory_{epoch_tag}.png")
         save_trajectory_grid(trajectory, traj_path)
 
     print("Done.")
@@ -211,11 +238,11 @@ def generate(checkpoint_path: str) -> None:
 # ===========================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="DDPM sample generator (Week 2)")
+    parser = argparse.ArgumentParser(description="DDPM sample generator (Week 3)")
     parser.add_argument(
         "--ckpt",
         default=CHECKPOINT_PATH,
-        help=f"Path to checkpoint .pt file (default: {CHECKPOINT_PATH})",
+        help="Path to checkpoint .pt file",
     )
     args = parser.parse_args()
     generate(args.ckpt)

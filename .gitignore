@@ -8,6 +8,9 @@ data/
 # Model checkpoints
 checkpoints/
 
+# Week 3 experiment outputs (checkpoints, logs, samples)
+experiments/
+
 # Generated sample images
 outputs/
 

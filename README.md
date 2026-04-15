@@ -12,10 +12,12 @@ epsilon-prediction on Fashion-MNIST with a **linear beta schedule**.
 | File | Purpose |
 |---|---|
 | `data.py` | Fashion-MNIST dataloaders (normalized to \[−1, 1\]) |
-| `schedule.py` | `linear_beta_schedule` — returns betas as a 1-D tensor |
-| `diffusion.py` | `GaussianDiffusion` — precomputed coefficients + `q_sample` |
+| `schedule.py` | `linear_beta_schedule`, `cosine_beta_schedule`, `get_beta_schedule` |
+| `diffusion.py` | `GaussianDiffusion` — forward + reverse diffusion |
 | `model.py` | `SmallUNet` — U-Net with sinusoidal timestep embeddings |
-| `train.py` | Training loop, config, checkpointing |
+| `train.py` | Training loop with CLI, experiment folders, loss logging |
+| `sample.py` | Image generation from any checkpoint |
+| `experiment.py` | Runs linear vs cosine comparison end-to-end |
 
 ### Quick start
 
@@ -54,15 +56,17 @@ Training complete.
 
 ### Configuration
 
-All hyper-parameters live at the top of `train.py`:
+All hyper-parameters are configurable via CLI (see Week 3 CLI reference).
+Defaults:
 
 ```python
-BATCH_SIZE    = 128
-LEARNING_RATE = 2e-4
-EPOCHS        = 10
-TIMESTEPS     = 200     # T — number of diffusion steps
-SAVE_EVERY    = 2       # checkpoint frequency (epochs)
-NUM_WORKERS   = 2       # set to 0 on Windows if multiprocessing errors occur
+schedule      = "linear"
+batch_size    = 128
+learning_rate = 2e-4
+epochs        = 10
+timesteps     = 200     # T — number of diffusion steps
+save_every    = 2       # checkpoint frequency (epochs)
+seed          = 42
 ```
 
 ### Checkpoint format
@@ -149,8 +153,107 @@ $$x_0 = \mu_\theta \quad (t = 0, \text{ no noise added})$$
 
 ### Extension points (Week 3+)
 
-- **Cosine schedule:** add `cosine_beta_schedule()` in `schedule.py`, retrain, compare grids
 - **Loss-by-timestep analysis:** log MSE per `t` bucket to identify hard timesteps
 - **SNR analysis:** `snr_t = alpha_bars / (1 - alpha_bars)` — already precomputed in `GaussianDiffusion`
 - **FID / IS metrics:** evaluate sample quality quantitatively
 - **DDIM sampler:** fewer steps, faster generation
+
+---
+
+## Week 3 — Cosine Schedule & Reproducible Comparisons
+
+This week adds the cosine noise schedule and the infrastructure to run fair,
+reproducible comparisons between linear and cosine training runs.
+
+### New / updated files
+
+| File | Changes |
+|---|---|
+| `schedule.py` | Added `cosine_beta_schedule`, `get_beta_schedule` dispatcher |
+| `train.py` | Full CLI, per-run experiment folders, JSON config, CSV loss log |
+| `sample.py` | Reads schedule from checkpoint config — no longer assumes linear |
+| `experiment.py` | New — runs both schedules with identical settings |
+
+### Quick start
+
+**Run the full comparison (recommended):**
+```bash
+python experiment.py
+```
+
+**Run schedules individually:**
+```bash
+python train.py --schedule linear --run_name run_01
+python train.py --schedule cosine --run_name run_01
+```
+
+**Generate samples for a completed run:**
+```bash
+python sample.py --ckpt experiments/linear/run_01/checkpoints/ckpt_epoch0010.pt
+python sample.py --ckpt experiments/cosine/run_01/checkpoints/ckpt_epoch0010.pt
+```
+
+### Output folder structure
+
+```
+experiments/
+  linear/run_01/
+    config.json                        ← full hyperparameters
+    checkpoints/ckpt_epoch0002.pt
+    checkpoints/ckpt_epoch0010.pt
+    logs/loss.csv                      ← epoch, avg_loss (for Week 4 plots)
+    samples/samples_epoch0010.png
+    samples/samples_latest.png
+    samples/trajectory_epoch0010.png
+  cosine/run_01/
+    (identical layout)
+```
+
+### Fair comparison guarantee
+
+The following are held constant across all runs — only `--schedule` changes:
+
+| Setting | Value |
+|---|---|
+| Dataset | Fashion-MNIST |
+| Architecture | `SmallUNet` (base\_channels=32, time\_dim=128) |
+| Timesteps T | 200 |
+| Optimizer | Adam, lr=2e-4 |
+| Batch size | 128 |
+| Epochs | 10 |
+| Random seed | 42 |
+
+### Cosine schedule
+
+Implemented from Nichol & Dhariwal (2021). Defines ᾱ_t as a cosine curve,
+then derives β_t from consecutive ratios:
+
+$$f(t) = \cos^2\!\left(\frac{t/T + s}{1 + s} \cdot \frac{\pi}{2}\right), \quad s = 0.008$$
+
+$$\bar\alpha_t = \frac{f(t)}{f(0)}, \qquad \beta_t = 1 - \frac{\bar\alpha_t}{\bar\alpha_{t-1}}$$
+
+Betas are clipped to [0, 0.999] to prevent numerical instability.
+
+### train.py CLI reference
+
+```
+python train.py [options]
+
+  --schedule       linear | cosine          (default: linear)
+  --run_name       name for this run        (default: run_01)
+  --epochs         int                      (default: 10)
+  --timesteps      int                      (default: 200)
+  --batch_size     int                      (default: 128)
+  --learning_rate  float                    (default: 2e-4)
+  --save_every     int                      (default: 2)
+  --seed           int                      (default: 42)
+  --experiment_root  path                   (default: experiments)
+```
+
+### Extension points (Week 4+)
+
+- **Loss curve comparison:** load both `logs/loss.csv` files and plot on the same axes
+- **SNR analysis:** `snr_t = alpha_bars / (1 - alpha_bars)` — plot linear vs cosine SNR curves
+- **Loss-by-timestep analysis:** log MSE per `t` bucket to identify where each schedule struggles
+- **Gradient norm logging:** add `clip_grad_norm_` and log norms per epoch
+- **FID / IS metrics:** quantitative sample quality comparison
