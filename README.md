@@ -65,14 +65,6 @@ SAVE_EVERY    = 2       # checkpoint frequency (epochs)
 NUM_WORKERS   = 2       # set to 0 on Windows if multiprocessing errors occur
 ```
 
-### Extension points (Week 2+)
-
-- **Cosine schedule:** add `cosine_beta_schedule()` in `schedule.py` and swap it in `train.py`
-- **Loss-by-timestep analysis:** log `loss.item()` per `t` value inside the batch loop
-- **Reverse sampling / generation:** implement `p_sample` in `diffusion.py`
-- **SNR analysis:** `snr_t = alpha_bars / (1 - alpha_bars)` — already precomputed in `GaussianDiffusion`
-- **Gradient norm logging:** `torch.nn.utils.clip_grad_norm_` before `optimizer.step()`
-
 ### Checkpoint format
 
 Each `.pt` file contains:
@@ -91,3 +83,74 @@ Load with:
 ckpt = torch.load("checkpoints/ckpt_epoch0010.pt", map_location="cpu")
 model.load_state_dict(ckpt["model_state_dict"])
 ```
+
+---
+
+## Week 2 — Reverse Diffusion & Image Generation
+
+This week implements the full DDPM reverse process so the trained model can
+generate Fashion-MNIST images from pure Gaussian noise.
+
+### New / updated files
+
+| File | Changes |
+|---|---|
+| `diffusion.py` | Added `p_sample`, `sample`, `sample_with_trajectory` |
+| `sample.py` | New standalone generation script |
+
+### Quick start
+
+```bash
+# Generate 16 images using the latest checkpoint (default)
+python sample.py
+
+# Use a specific checkpoint
+python sample.py --ckpt checkpoints/ckpt_epoch0006.pt
+```
+
+Outputs are written to `outputs/`:
+
+| File | Contents |
+|---|---|
+| `outputs/samples_epoch0010.png` | 4×4 grid of generated images |
+| `outputs/samples_latest.png` | Stable alias, always the most recent run |
+| `outputs/trajectory_epoch0010.png` | Single sample denoising strip (noisy → clean) |
+
+### Configuration
+
+All options live at the top of `sample.py`:
+
+```python
+CHECKPOINT_PATH = "checkpoints/ckpt_epoch0010.pt"
+NUM_SAMPLES     = 16      # keep a perfect square for a clean grid
+TIMESTEPS       = 200     # must match the value used in train.py
+OUTPUT_DIR      = "outputs"
+GRID_NROW       = 4
+SAVE_TRAJECTORY = True
+TRAJ_EVERY      = 20      # snapshot frequency for the trajectory strip
+```
+
+### Reverse diffusion equations
+
+The DDPM posterior mean at each step:
+
+$$\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}} \left( x_t - \frac{\beta_t}{\sqrt{1-\bar\alpha_t}} \cdot \hat\epsilon_\theta(x_t, t) \right)$$
+
+Sample:
+
+$$x_{t-1} = \mu_\theta + \sqrt{\beta_t} \cdot z, \quad z \sim \mathcal{N}(0, I) \quad (t > 0)$$
+$$x_0 = \mu_\theta \quad (t = 0, \text{ no noise added})$$
+
+### Signs generation is healthy
+
+- Grid contains recognisable Fashion-MNIST silhouettes (tops, bags, shoes, etc.)
+- Trajectory strip shows smooth noise → structure progression left to right
+- No all-black, all-white, or fully uniform images
+
+### Extension points (Week 3+)
+
+- **Cosine schedule:** add `cosine_beta_schedule()` in `schedule.py`, retrain, compare grids
+- **Loss-by-timestep analysis:** log MSE per `t` bucket to identify hard timesteps
+- **SNR analysis:** `snr_t = alpha_bars / (1 - alpha_bars)` — already precomputed in `GaussianDiffusion`
+- **FID / IS metrics:** evaluate sample quality quantitatively
+- **DDIM sampler:** fewer steps, faster generation
