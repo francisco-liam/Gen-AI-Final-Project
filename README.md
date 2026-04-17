@@ -74,22 +74,24 @@ machine — that's fine, PyTorch handles it).
 
 ```bash
 # Full pipeline — both datasets, both schedules, FID/IS at the end
-python run_all.py
-
-# With bottleneck self-attention (recommended for cosine to show its advantage)
 python run_all.py --use_attention
 
 # One dataset only
-python run_all.py --datasets cifar10 --use_attention
+python run_all.py --datasets fashionmnist --use_attention
 
 # Skip training if checkpoints already exist
-python run_all.py --skip_train
+python run_all.py --datasets fashionmnist --use_attention --skip_train
+
+# Resume a crashed training run from the latest checkpoint
+python train.py --schedule cosine --dataset cifar10 --run_name run_01 \
+  --epochs 150 --base_channels 64 --use_attention --resume
 
 # Quick smoke-test (2 epochs, no FID)
 python run_all.py --epochs 2 --skip_fid
 ```
 
-All outputs land in `outputs/<dataset>/`.
+Primary results (FashionMNIST, both schedules, attention=True) are stored in
+`fashionmnist/`.  CIFAR-10 linear results are in `experiments/cifar10/`.
 
 ---
 
@@ -161,20 +163,15 @@ python run_all.py --epochs 2 --skip_fid
 ## Output folder structure
 
 ```
-experiments/
-  fashionmnist/
+fashionmnist/                  ← PRIMARY RESULTS
+  experiments/
     linear/run_01/
       config.json
-      checkpoints/ckpt_epoch0002.pt … ckpt_epoch0100.pt
+      checkpoints/ckpt_epoch0010.pt … ckpt_epoch0100.pt
       logs/loss.csv  gradnorm.csv  loss_by_t.csv
       samples/samples_latest.png  trajectory_epoch0100.png
-    cosine/run_01/   (identical layout)
-  cifar10/
-    linear/run_01/   (identical layout)
-    cosine/run_01/
-
-outputs/
-  fashionmnist/
+    cosine/run_01/             (identical layout)
+  outputs/
     snr_comparison.png
     loss_comparison.png
     loss_by_t_comparison.png
@@ -182,8 +179,12 @@ outputs/
     sample_comparison.png
     fid_is_comparison.png
     summary_metrics.csv
-  cifar10/
-    (same files)
+
+experiments/cifar10/           ← CIFAR results
+  linear/run_01/               (150 epochs, attention=True, converged)
+  cosine/run_01/               (150 epochs, attention=True, underconverged)
+
+outputs/cifar10/               ← CIFAR figures
 ```
 
 ---
@@ -217,6 +218,7 @@ All `train.py` CLI options:
   --save_every      int                    (default: 2)
   --seed            int                    (default: 42)
   --use_attention   flag                   add bottleneck self-attention
+  --resume          flag                   resume from latest checkpoint
   --experiment_root path                   (default: experiments)
 ```
 

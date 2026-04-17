@@ -130,18 +130,38 @@ def train(cfg: dict) -> None:
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {total_params:,}")
 
+    # ── Resume from checkpoint ──────────────────────────────────────────
+    start_epoch = 1
+    if cfg.get("resume"):
+        ckpt_files = sorted([
+            f for f in os.listdir(ckpt_dir) if f.startswith("ckpt_epoch") and f.endswith(".pt")
+        ])
+        if ckpt_files:
+            latest = os.path.join(ckpt_dir, ckpt_files[-1])
+            print(f"Resuming from checkpoint: {latest}")
+            ckpt = torch.load(latest, map_location=device)
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = ckpt["epoch"] + 1
+            print(f"Resuming from epoch {start_epoch}")
+        else:
+            print("[WARNING] --resume specified but no checkpoints found; starting from scratch.")
+
     # ── Loss log ─────────────────────────────────────────────────────────
     # Written incrementally so a crashed run still has partial data.
+    log_mode  = "a" if cfg.get("resume") and start_epoch > 1 else "w"
     loss_csv = os.path.join(log_dir, "loss.csv")
-    csv_file  = open(loss_csv, "w", newline="")
+    csv_file  = open(loss_csv, log_mode, newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["epoch", "avg_loss"])
+    if log_mode == "w":
+        csv_writer.writerow(["epoch", "avg_loss"])
 
     # ── Gradient norm log ────────────────────────────────────────────────
     gradnorm_csv  = os.path.join(log_dir, "gradnorm.csv")
-    gn_file       = open(gradnorm_csv, "w", newline="")
+    gn_file       = open(gradnorm_csv, log_mode, newline="")
     gn_writer     = csv.writer(gn_file)
-    gn_writer.writerow(["epoch", "avg_gradnorm"])
+    if log_mode == "w":
+        gn_writer.writerow(["epoch", "avg_gradnorm"])
 
     # ── Per-timestep-bucket loss log ─────────────────────────────────────
     # We split T timesteps into N_BUCKETS equal-width buckets and record the
@@ -149,15 +169,16 @@ def train(cfg: dict) -> None:
     # schedule finds hardest (high loss → schedule assigns hard denoising task).
     N_BUCKETS     = 10
     t_loss_csv    = os.path.join(log_dir, "loss_by_t.csv")
-    tl_file       = open(t_loss_csv, "w", newline="")
+    tl_file       = open(t_loss_csv, log_mode, newline="")
     tl_writer     = csv.writer(tl_file)
-    tl_writer.writerow(["epoch"] + [f"bucket_{i}" for i in range(N_BUCKETS)])
+    if log_mode == "w":
+        tl_writer.writerow(["epoch"] + [f"bucket_{i}" for i in range(N_BUCKETS)])
 
     # ── Training loop ────────────────────────────────────────────────────
     EPOCHS    = cfg["epochs"]
     TIMESTEPS = cfg["timesteps"]
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(start_epoch, EPOCHS + 1):
         model.train()
         running_loss   = 0.0
         running_gnorm  = 0.0
@@ -274,6 +295,8 @@ def parse_args() -> dict:
                         choices=SUPPORTED_DATASETS,
                         help="Dataset to train on (default: fashionmnist)")
     parser.add_argument("--experiment_root",            default=DEFAULTS["experiment_root"])
+    parser.add_argument("--resume",         action="store_true",
+                        help="Resume training from the latest checkpoint in the run directory")
     args = parser.parse_args()
 
     cfg = DEFAULTS.copy()

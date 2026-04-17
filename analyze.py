@@ -445,16 +445,18 @@ def _generate_samples_for_fid(model, diffusion, n_samples, in_channels=1, image_
     Returns uint8 RGB tensor (N, 3, H, W) for torchmetrics.
     """
     import torch
+    from tqdm import tqdm
     device   = next(model.parameters()).device
     T        = diffusion.T
     all_imgs = []
+    n_batches = (n_samples + batch_size - 1) // batch_size
 
     with torch.no_grad():
-        for start in range(0, n_samples, batch_size):
+        for start in tqdm(range(0, n_samples, batch_size), total=n_batches, desc="Generating", unit="batch"):
             bs = min(batch_size, n_samples - start)
             x  = torch.randn(bs, in_channels, image_size, image_size, device=device)
 
-            for t_idx in reversed(range(T)):
+            for t_idx in tqdm(reversed(range(T)), total=T, desc=f"  Denoising batch {start//batch_size+1}/{n_batches}", leave=False):
                 t_batch  = torch.full((bs,), t_idx, device=device, dtype=torch.long)
                 eps_pred = model(x, t_batch)
 

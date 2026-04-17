@@ -192,6 +192,7 @@ class GaussianDiffusion:
         model: torch.nn.Module,
         num_samples: int,
         device: torch.device,
+        image_shape: tuple = (1, 28, 28),
     ) -> torch.Tensor:
         """
         Full reverse diffusion: generate images from pure Gaussian noise.
@@ -213,7 +214,7 @@ class GaussianDiffusion:
         model.eval()
 
         # Start from isotropic Gaussian noise  x_T ~ N(0, I)
-        x = torch.randn(num_samples, 1, 28, 28, device=device)
+        x = torch.randn(num_samples, *image_shape, device=device)
 
         # Iteratively denoise from t = T-1 down to t = 0
         for t_index in reversed(range(self.T)):
@@ -228,6 +229,7 @@ class GaussianDiffusion:
         num_samples: int,
         device: torch.device,
         save_every: int = 20,
+        image_shape: tuple = (1, 28, 28),
     ) -> tuple[torch.Tensor, list[tuple[int, torch.Tensor]]]:
         """
         Like sample(), but also returns intermediate denoising states so you
@@ -247,7 +249,7 @@ class GaussianDiffusion:
         """
         model.eval()
 
-        x = torch.randn(num_samples, 1, 28, 28, device=device)
+        x = torch.randn(num_samples, *image_shape, device=device)
         trajectory: list[tuple[int, torch.Tensor]] = []
 
         for t_index in reversed(range(self.T)):

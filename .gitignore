@@ -2,24 +2,24 @@
 venv/
 .venv/
 
-# Downloaded dataset
+# Downloaded datasets
 data/
 
-# Model checkpoints
-checkpoints/
-
-# Week 3 experiment outputs (checkpoints, logs, samples)
+# Experiment outputs (checkpoints, logs, samples, figures)
 experiments/
-
-# Generated sample images
 outputs/
+fashionmnist/
 
 # Python cache
 __pycache__/
 *.py[cod]
 
-# Jupyter notebooks (if added later)
+# Jupyter notebooks
 .ipynb_checkpoints/
+
+# Logs
+/tmp/*.log
 
 # OS
 .DS_Store
+Thumbs.db

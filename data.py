@@ -5,6 +5,8 @@ Images are normalized to [-1, 1], which is standard for diffusion training.
 The model learns to add and remove noise in this range.
 """
 
+import warnings
+
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
@@ -62,7 +64,10 @@ def get_dataloaders(
             f"Unknown dataset '{dataset}'. Choose from: {SUPPORTED_DATASETS}"
         )
 
-    train_dataset = cls(root=data_root, train=True, download=True, transform=transform)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="torchvision")
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
+        train_dataset = cls(root=data_root, train=True, download=True, transform=transform)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -72,7 +77,10 @@ def get_dataloaders(
     )
 
     if val:
-        val_dataset = cls(root=data_root, train=False, download=True, transform=transform)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="torchvision")
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
+            val_dataset = cls(root=data_root, train=False, download=True, transform=transform)
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,

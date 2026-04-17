@@ -211,6 +211,10 @@ def generate(checkpoint_path: str) -> None:
     output_dir = _output_dir(checkpoint_path)
     os.makedirs(output_dir, exist_ok=True)
 
+    dataset      = cfg.get("dataset", "fashionmnist")
+    dset_info    = DATASET_INFO.get(dataset, {"in_channels": 1, "image_size": 28})
+    image_shape  = (dset_info["in_channels"], dset_info["image_size"], dset_info["image_size"])
+
     if SAVE_TRAJECTORY:
         # sample_with_trajectory returns both final images and snapshots
         samples, trajectory = diffusion.sample_with_trajectory(
@@ -218,9 +222,11 @@ def generate(checkpoint_path: str) -> None:
             num_samples=NUM_SAMPLES,
             device=device,
             save_every=TRAJ_EVERY,
+            image_shape=image_shape,
         )
     else:
-        samples = diffusion.sample(model, num_samples=NUM_SAMPLES, device=device)
+        samples = diffusion.sample(model, num_samples=NUM_SAMPLES, device=device,
+                                   image_shape=image_shape)
         trajectory = []
 
     # ── Save outputs ──────────────────────────────────────────────────────
