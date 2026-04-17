@@ -1,232 +1,234 @@
 # Noise Schedule Geometry in Diffusion Models
 
-A study of how different beta schedules affect DDPM training dynamics on Fashion-MNIST.
+A study of how linear vs cosine beta schedules affect DDPM training dynamics
+and sample quality on FashionMNIST and CIFAR-10.  Models are trained under
+both schedules with identical settings, with optional bottleneck self-attention,
+then figures and tables comparing SNR geometry, training loss, gradient
+behaviour, and generated sample quality are produced automatically.
 
-## Week 1 — Minimal Working Pipeline
+See [CONTEXT.md](CONTEXT.md) for full project history, experimental results,
+and the scientific narrative.
 
-This week establishes a clean, extensible training baseline:
-epsilon-prediction on Fashion-MNIST with a **linear beta schedule**.
+---
 
-### File overview
+## Setup on a new machine
+
+### Prerequisites
+
+- Python 3.10+ (project was developed on **Python 3.10.12**)
+- Git
+- CUDA-capable GPU strongly recommended (CPU training is very slow for CIFAR-10)
+
+### 1. Clone the repo
+
+```bash
+git clone <your-repo-url>
+cd Gen-AI-Final-Project
+```
+
+### 2. Create a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate      # Linux / macOS
+# .venv\Scripts\activate       # Windows
+```
+
+### 3. Install dependencies
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+> **Note:** `torch==2.11.0` and `torchvision==0.26.0` in `requirements.txt`
+> are CUDA 12.x builds. If your new machine has a different CUDA version or
+> you need CPU-only, install PyTorch separately first:
+>
+> ```bash
+> # CPU only
+> pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+>
+> # CUDA 11.8
+> pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+>
+> # Then install the rest
+> pip install torchmetrics[image] torch_fidelity matplotlib numpy pandas pillow scipy tqdm
+> ```
+
+### 4. Verify the install
+
+```bash
+python -c "import torch, torchvision, torchmetrics; print('torch', torch.__version__); print('GPU:', torch.cuda.is_available())"
+```
+
+### 5. Data
+
+FashionMNIST and CIFAR-10 are downloaded automatically on first run.
+They land in `data/` (which is `.gitignore`d, so you start fresh on a new
+machine — that's fine, PyTorch handles it).
+
+---
+
+## Quick start
+
+```bash
+# Full pipeline — both datasets, both schedules, FID/IS at the end
+python run_all.py
+
+# With bottleneck self-attention (recommended for cosine to show its advantage)
+python run_all.py --use_attention
+
+# One dataset only
+python run_all.py --datasets cifar10 --use_attention
+
+# Skip training if checkpoints already exist
+python run_all.py --skip_train
+
+# Quick smoke-test (2 epochs, no FID)
+python run_all.py --epochs 2 --skip_fid
+```
+
+All outputs land in `outputs/<dataset>/`.
+
+---
+
+## Project structure
 
 | File | Purpose |
 |---|---|
-| `data.py` | Fashion-MNIST dataloaders (normalized to \[−1, 1\]) |
+| `data.py` | Dataloaders for FashionMNIST and CIFAR-10, normalised to [−1, 1] |
 | `schedule.py` | `linear_beta_schedule`, `cosine_beta_schedule`, `get_beta_schedule` |
-| `diffusion.py` | `GaussianDiffusion` — forward + reverse diffusion |
-| `model.py` | `SmallUNet` — U-Net with sinusoidal timestep embeddings |
-| `train.py` | Training loop with CLI, experiment folders, loss logging |
-| `sample.py` | Image generation from any checkpoint |
-| `experiment.py` | Runs linear vs cosine comparison end-to-end |
+| `diffusion.py` | `GaussianDiffusion` — forward noising + DDPM reverse denoising |
+| `model.py` | `SmallUNet` with sinusoidal timestep embeddings and optional bottleneck self-attention |
+| `train.py` | Training loop with CLI, experiment folders, and CSV logging |
+| `sample.py` | Image generation from any saved checkpoint |
+| `experiment.py` | Runs both schedules end-to-end (alternative to `run_all.py`) |
+| `analyze.py` | Loads saved outputs and produces all figures and tables |
+| `run_all.py` | **Single entry point** — train → sample → analyze |
 
-### Quick start
+---
+
+## Running individual steps
+
+### Training
 
 ```bash
-# Install dependencies (PyTorch ≥ 2.0 recommended)
-pip install torch torchvision
+# Train one schedule on FashionMNIST (no attention)
+python train.py --schedule linear --dataset fashionmnist --run_name run_01
 
-# Run training (Fashion-MNIST downloads automatically on first run)
-python train.py
+# Train on CIFAR-10 with bottleneck self-attention, larger model
+python train.py --schedule cosine --dataset cifar10 --base_channels 64 --epochs 150 --use_attention
+
+# Or run both schedules for a dataset in one command
+python experiment.py --datasets cifar10 --use_attention
 ```
 
-### Expected output
+### Sampling
 
-A healthy Week 1 run should look roughly like:
-
-```
-Training on: cuda
-Training batches per epoch: 468
-Model parameters: 417,985
-Epoch [  1/10]  loss: 0.9214
-Epoch [  2/10]  loss: 0.6831
-           checkpoint saved → checkpoints/ckpt_epoch0002.pt
-Epoch [  3/10]  loss: 0.6102
-...
-Epoch [ 10/10]  loss: 0.4873
-           checkpoint saved → checkpoints/ckpt_epoch0010.pt
-Training complete.
+```bash
+# Architecture is read from the config saved inside the .pt file
+python sample.py --ckpt experiments/fashionmnist/linear/run_01/checkpoints/ckpt_epoch0100.pt
+python sample.py --ckpt experiments/cifar10/cosine/run_01/checkpoints/ckpt_epoch0150.pt
 ```
 
-**Signs training is healthy:**
-- Loss drops noticeably from epoch 1 → 3 (typically ~1.0 → ~0.6)
-- Loss continues decreasing, slowing toward epoch 10
-- No NaN or inf values appear
+### Analysis only (training already done)
 
-**If loss stays flat or explodes:** lower the learning rate or reduce `TIMESTEPS`.
-
-### Configuration
-
-All hyper-parameters are configurable via CLI (see Week 3 CLI reference).
-Defaults:
-
-```python
-schedule      = "linear"
-batch_size    = 128
-learning_rate = 2e-4
-epochs        = 10
-timesteps     = 200     # T — number of diffusion steps
-save_every    = 2       # checkpoint frequency (epochs)
-seed          = 42
+```bash
+python analyze.py --dataset fashionmnist          # with FID/IS
+python analyze.py --dataset cifar10 --skip_fid    # skip FID/IS, everything else runs
+python analyze.py --dataset fashionmnist --fid_samples 2000
 ```
 
-### Checkpoint format
+### Pipeline shortcuts
 
-Each `.pt` file contains:
-```python
-{
-    "epoch": int,
-    "model_state_dict": ...,
-    "optimizer_state_dict": ...,
-    "loss": float,          # average MSE for that epoch
-    "config": { ... }       # hyper-parameters used
-}
-```
+```bash
+# Already trained — skip retraining
+python run_all.py --skip_train
 
-Load with:
-```python
-ckpt = torch.load("checkpoints/ckpt_epoch0010.pt", map_location="cpu")
-model.load_state_dict(ckpt["model_state_dict"])
+# Already have samples too — analysis only
+python run_all.py --skip_train --skip_sample
+
+# One dataset, attention on
+python run_all.py --datasets cifar10 --use_attention
+
+# Quick smoke-test with 2 epochs, no FID
+python run_all.py --epochs 2 --skip_fid
 ```
 
 ---
 
-## Week 2 — Reverse Diffusion & Image Generation
-
-This week implements the full DDPM reverse process so the trained model can
-generate Fashion-MNIST images from pure Gaussian noise.
-
-### New / updated files
-
-| File | Changes |
-|---|---|
-| `diffusion.py` | Added `p_sample`, `sample`, `sample_with_trajectory` |
-| `sample.py` | New standalone generation script |
-
-### Quick start
-
-```bash
-# Generate 16 images using the latest checkpoint (default)
-python sample.py
-
-# Use a specific checkpoint
-python sample.py --ckpt checkpoints/ckpt_epoch0006.pt
-```
-
-Outputs are written to `outputs/`:
-
-| File | Contents |
-|---|---|
-| `outputs/samples_epoch0010.png` | 4×4 grid of generated images |
-| `outputs/samples_latest.png` | Stable alias, always the most recent run |
-| `outputs/trajectory_epoch0010.png` | Single sample denoising strip (noisy → clean) |
-
-### Configuration
-
-All options live at the top of `sample.py`:
-
-```python
-CHECKPOINT_PATH = "checkpoints/ckpt_epoch0010.pt"
-NUM_SAMPLES     = 16      # keep a perfect square for a clean grid
-TIMESTEPS       = 200     # must match the value used in train.py
-OUTPUT_DIR      = "outputs"
-GRID_NROW       = 4
-SAVE_TRAJECTORY = True
-TRAJ_EVERY      = 20      # snapshot frequency for the trajectory strip
-```
-
-### Reverse diffusion equations
-
-The DDPM posterior mean at each step:
-
-$$\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}} \left( x_t - \frac{\beta_t}{\sqrt{1-\bar\alpha_t}} \cdot \hat\epsilon_\theta(x_t, t) \right)$$
-
-Sample:
-
-$$x_{t-1} = \mu_\theta + \sqrt{\beta_t} \cdot z, \quad z \sim \mathcal{N}(0, I) \quad (t > 0)$$
-$$x_0 = \mu_\theta \quad (t = 0, \text{ no noise added})$$
-
-### Signs generation is healthy
-
-- Grid contains recognisable Fashion-MNIST silhouettes (tops, bags, shoes, etc.)
-- Trajectory strip shows smooth noise → structure progression left to right
-- No all-black, all-white, or fully uniform images
-
-### Extension points (Week 3+)
-
-- **Loss-by-timestep analysis:** log MSE per `t` bucket to identify hard timesteps
-- **SNR analysis:** `snr_t = alpha_bars / (1 - alpha_bars)` — already precomputed in `GaussianDiffusion`
-- **FID / IS metrics:** evaluate sample quality quantitatively
-- **DDIM sampler:** fewer steps, faster generation
-
----
-
-## Week 3 — Cosine Schedule & Reproducible Comparisons
-
-This week adds the cosine noise schedule and the infrastructure to run fair,
-reproducible comparisons between linear and cosine training runs.
-
-### New / updated files
-
-| File | Changes |
-|---|---|
-| `schedule.py` | Added `cosine_beta_schedule`, `get_beta_schedule` dispatcher |
-| `train.py` | Full CLI, per-run experiment folders, JSON config, CSV loss log |
-| `sample.py` | Reads schedule from checkpoint config — no longer assumes linear |
-| `experiment.py` | New — runs both schedules with identical settings |
-
-### Quick start
-
-**Run the full comparison (recommended):**
-```bash
-python experiment.py
-```
-
-**Run schedules individually:**
-```bash
-python train.py --schedule linear --run_name run_01
-python train.py --schedule cosine --run_name run_01
-```
-
-**Generate samples for a completed run:**
-```bash
-python sample.py --ckpt experiments/linear/run_01/checkpoints/ckpt_epoch0010.pt
-python sample.py --ckpt experiments/cosine/run_01/checkpoints/ckpt_epoch0010.pt
-```
-
-### Output folder structure
+## Output folder structure
 
 ```
 experiments/
-  linear/run_01/
-    config.json                        ← full hyperparameters
-    checkpoints/ckpt_epoch0002.pt
-    checkpoints/ckpt_epoch0010.pt
-    logs/loss.csv                      ← epoch, avg_loss (for Week 4 plots)
-    samples/samples_epoch0010.png
-    samples/samples_latest.png
-    samples/trajectory_epoch0010.png
-  cosine/run_01/
-    (identical layout)
+  fashionmnist/
+    linear/run_01/
+      config.json
+      checkpoints/ckpt_epoch0002.pt … ckpt_epoch0100.pt
+      logs/loss.csv  gradnorm.csv  loss_by_t.csv
+      samples/samples_latest.png  trajectory_epoch0100.png
+    cosine/run_01/   (identical layout)
+  cifar10/
+    linear/run_01/   (identical layout)
+    cosine/run_01/
+
+outputs/
+  fashionmnist/
+    snr_comparison.png
+    loss_comparison.png
+    loss_by_t_comparison.png
+    gradnorm_comparison.png
+    sample_comparison.png
+    fid_is_comparison.png
+    summary_metrics.csv
+  cifar10/
+    (same files)
 ```
 
-### Fair comparison guarantee
+---
 
-The following are held constant across all runs — only `--schedule` changes:
+## Experiment configuration
 
-| Setting | Value |
-|---|---|
-| Dataset | Fashion-MNIST |
-| Architecture | `SmallUNet` (base\_channels=32, time\_dim=128) |
-| Timesteps T | 200 |
-| Optimizer | Adam, lr=2e-4 |
-| Batch size | 128 |
-| Epochs | 10 |
-| Random seed | 42 |
+Dataset-specific defaults (overridable via CLI):
 
-### Cosine schedule
+| Setting | FashionMNIST | CIFAR-10 |
+|---|---|---|
+| Image size | 28×28, 1ch | 32×32, 3ch |
+| `base_channels` | 32 | 64 |
+| Epochs | 100 | 150 |
+| Timesteps T | 1000 | 1000 |
+| Optimizer | Adam, lr=2e-4 | Adam, lr=2e-4 |
+| Batch size | 128 | 128 |
+| Random seed | 42 | 42 |
+| Self-attention | off by default | off by default |
 
-Implemented from Nichol & Dhariwal (2021). Defines ᾱ_t as a cosine curve,
-then derives β_t from consecutive ratios:
+All `train.py` CLI options:
+
+```
+  --schedule        linear | cosine        (default: linear)
+  --dataset         fashionmnist | cifar10 (default: fashionmnist)
+  --run_name        str                    (default: run_01)
+  --epochs          int                    (default: 10)
+  --base_channels   int                    (default: 32)
+  --timesteps       int                    (default: 1000)
+  --batch_size      int                    (default: 128)
+  --learning_rate   float                  (default: 2e-4)
+  --save_every      int                    (default: 2)
+  --seed            int                    (default: 42)
+  --use_attention   flag                   add bottleneck self-attention
+  --experiment_root path                   (default: experiments)
+```
+
+---
+
+## Noise schedules
+
+### Linear (Ho et al., 2020)
+
+$$\beta_t = \beta_{\text{start}} + \frac{t}{T-1}(\beta_{\text{end}} - \beta_{\text{start}}), \quad \beta_{\text{start}} = 10^{-4},\ \beta_{\text{end}} = 0.02$$
+
+### Cosine (Nichol & Dhariwal, 2021)
 
 $$f(t) = \cos^2\!\left(\frac{t/T + s}{1 + s} \cdot \frac{\pi}{2}\right), \quad s = 0.008$$
 
@@ -234,26 +236,67 @@ $$\bar\alpha_t = \frac{f(t)}{f(0)}, \qquad \beta_t = 1 - \frac{\bar\alpha_t}{\ba
 
 Betas are clipped to [0, 0.999] to prevent numerical instability.
 
-### train.py CLI reference
+---
 
+## Forward and reverse diffusion
+
+**Forward (noising):**
+
+$$x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1 - \bar\alpha_t}\, \varepsilon, \qquad \varepsilon \sim \mathcal{N}(0, I)$$
+
+**Signal-to-noise ratio:**
+
+$$\text{SNR}(t) = \frac{\bar\alpha_t}{1 - \bar\alpha_t}$$
+
+**Reverse (denoising) — DDPM posterior mean:**
+
+$$\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}} \left( x_t - \frac{\beta_t}{\sqrt{1-\bar\alpha_t}} \cdot \hat\varepsilon_\theta(x_t, t) \right)$$
+
+$$x_{t-1} = \mu_\theta + \sqrt{\beta_t}\, z, \quad z \sim \mathcal{N}(0, I) \quad (t > 0)$$
+
+---
+
+## Checkpoint format
+
+Each `.pt` file contains:
+
+```python
+{
+    "epoch": int,
+    "model_state_dict": ...,
+    "optimizer_state_dict": ...,
+    "loss": float,       # average MSE for that epoch
+    "config": { ... }    # full hyperparameters
+}
 ```
-python train.py [options]
 
-  --schedule       linear | cosine          (default: linear)
-  --run_name       name for this run        (default: run_01)
-  --epochs         int                      (default: 10)
-  --timesteps      int                      (default: 200)
-  --batch_size     int                      (default: 128)
-  --learning_rate  float                    (default: 2e-4)
-  --save_every     int                      (default: 2)
-  --seed           int                      (default: 42)
-  --experiment_root  path                   (default: experiments)
+Load with:
+
+```python
+ckpt = torch.load("checkpoints/ckpt_epoch0010.pt", map_location="cpu")
+model.load_state_dict(ckpt["model_state_dict"])
 ```
 
-### Extension points (Week 4+)
+---
 
-- **Loss curve comparison:** load both `logs/loss.csv` files and plot on the same axes
-- **SNR analysis:** `snr_t = alpha_bars / (1 - alpha_bars)` — plot linear vs cosine SNR curves
-- **Loss-by-timestep analysis:** log MSE per `t` bucket to identify where each schedule struggles
-- **Gradient norm logging:** add `clip_grad_norm_` and log norms per epoch
-- **FID / IS metrics:** quantitative sample quality comparison
+## Analysis outputs
+
+`analyze.py` reads saved logs and checkpoints and writes all figures to
+`outputs/<dataset>/`.  Files can be dropped directly into a report or slides.
+
+| Figure | What it shows |
+|---|---|
+| `snr_comparison.png` | How quickly each schedule destroys signal — cosine preserves SNR more uniformly |
+| `loss_comparison.png` | Training convergence speed and final loss for each schedule |
+| `loss_by_t_comparison.png` | Which timestep range each schedule finds hardest |
+| `gradnorm_comparison.png` | Gradient stability across training |
+| `sample_comparison.png` | Side-by-side generated sample grids |
+| `fid_is_comparison.png` | FID (lower = better) and IS (higher = better) bar charts |
+| `summary_metrics.csv` | All key numbers in one table |
+
+---
+
+## References
+
+- Ho et al. (2020). *Denoising Diffusion Probabilistic Models.* [arXiv:2006.11239](https://arxiv.org/abs/2006.11239)
+- Nichol & Dhariwal (2021). *Improved Denoising Diffusion Probabilistic Models.* [arXiv:2102.09672](https://arxiv.org/abs/2102.09672)

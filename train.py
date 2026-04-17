@@ -1,11 +1,11 @@
 """
-train.py — DDPM epsilon-prediction training on Fashion-MNIST  (Weeks 1-3)
+train.py — DDPM epsilon-prediction training on Fashion-MNIST
 
 Usage:
-    # Week 1 / legacy — linear schedule, default folders
+    # Linear schedule (default)
     python train.py
 
-    # Week 3 — named experiments with explicit schedule selection
+    # Named experiments with explicit schedule selection
     python train.py --schedule linear  --run_name run_01
     python train.py --schedule cosine  --run_name run_01
 
@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from data      import get_dataloaders
+from data      import get_dataloaders, DATASET_INFO, SUPPORTED_DATASETS
 from diffusion import GaussianDiffusion
 from model     import SmallUNet
 from schedule  import get_beta_schedule, SUPPORTED_SCHEDULES
@@ -40,16 +40,18 @@ from schedule  import get_beta_schedule, SUPPORTED_SCHEDULES
 
 DEFAULTS = dict(
     schedule      = "linear",
+    dataset       = "fashionmnist",
     run_name      = "run_01",
     batch_size    = 128,
     learning_rate = 2e-4,
-    epochs        = 10,
-    timesteps     = 200,    # T — increase to 1000 for full DDPM quality
-    save_every    = 2,      # checkpoint frequency (epochs)
+    epochs        = 100,
+    timesteps     = 1000,   # T — canonical DDPM setting; cosine vs linear difference is clear here
+    save_every    = 10,     # checkpoint frequency (epochs)
     seed          = 42,
     num_workers   = 2,      # set 0 on Windows if multiprocessing errors occur
     base_channels = 32,
     time_dim      = 128,
+    use_attention  = False,
     experiment_root = "experiments",
 )
 
@@ -71,7 +73,7 @@ def _move_diffusion_to_device(diffusion: GaussianDiffusion, device: torch.device
 
 def _run_dir(cfg: dict) -> str:
     """Return the root directory for this experiment run."""
-    return os.path.join(cfg["experiment_root"], cfg["schedule"], cfg["run_name"])
+    return os.path.join(cfg["experiment_root"], cfg["dataset"], cfg["schedule"], cfg["run_name"])
 
 
 # ===========================================================================
@@ -105,6 +107,7 @@ def train(cfg: dict) -> None:
     train_loader = get_dataloaders(
         batch_size=cfg["batch_size"],
         num_workers=cfg["num_workers"],
+        dataset=cfg["dataset"],
     )
     print(f"Training batches per epoch: {len(train_loader)}")
 
@@ -116,9 +119,10 @@ def train(cfg: dict) -> None:
     # ── Model and optimiser ─────────────────────────────────────────────
     # Architecture is identical for all schedules — fair comparison.
     model = SmallUNet(
-        in_channels=1,
+        in_channels=DATASET_INFO[cfg["dataset"]]["in_channels"],
         base_channels=cfg["base_channels"],
         time_dim=cfg["time_dim"],
+        use_attention=cfg["use_attention"],
     ).to(device)
 
     optimizer = Adam(model.parameters(), lr=cfg["learning_rate"])
@@ -133,13 +137,35 @@ def train(cfg: dict) -> None:
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["epoch", "avg_loss"])
 
+    # ── Gradient norm log ────────────────────────────────────────────────
+    gradnorm_csv  = os.path.join(log_dir, "gradnorm.csv")
+    gn_file       = open(gradnorm_csv, "w", newline="")
+    gn_writer     = csv.writer(gn_file)
+    gn_writer.writerow(["epoch", "avg_gradnorm"])
+
+    # ── Per-timestep-bucket loss log ─────────────────────────────────────
+    # We split T timesteps into N_BUCKETS equal-width buckets and record the
+    # mean MSE inside each bucket.  This reveals which timestep range each
+    # schedule finds hardest (high loss → schedule assigns hard denoising task).
+    N_BUCKETS     = 10
+    t_loss_csv    = os.path.join(log_dir, "loss_by_t.csv")
+    tl_file       = open(t_loss_csv, "w", newline="")
+    tl_writer     = csv.writer(tl_file)
+    tl_writer.writerow(["epoch"] + [f"bucket_{i}" for i in range(N_BUCKETS)])
+
     # ── Training loop ────────────────────────────────────────────────────
     EPOCHS    = cfg["epochs"]
     TIMESTEPS = cfg["timesteps"]
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
-        running_loss = 0.0
+        running_loss   = 0.0
+        running_gnorm  = 0.0
+        n_batches      = 0
+
+        # Accumulators for per-timestep-bucket MSE
+        bucket_loss_sum   = [0.0] * N_BUCKETS
+        bucket_loss_count = [0]   * N_BUCKETS
 
         for x0, _ in train_loader:
             x0 = x0.to(device)               # (B, 1, 28, 28) in [-1, 1]
@@ -158,14 +184,46 @@ def train(cfg: dict) -> None:
 
             optimizer.zero_grad()
             loss.backward()
+
+            # Gradient clipping + logging — clip at 1.0 (common DDPM practice)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            running_gnorm += grad_norm.item()
+
             optimizer.step()
 
             running_loss += loss.item()
+            n_batches    += 1
 
-        avg_loss = running_loss / len(train_loader)
-        print(f"Epoch [{epoch:>3}/{EPOCHS}]  loss: {avg_loss:.4f}")
+            # Accumulate per-sample MSE into timestep buckets (no grad needed)
+            with torch.no_grad():
+                per_sample_mse = (noise_pred - noise).pow(2).mean(dim=(1, 2, 3))  # (B,)
+                t_cpu = t.cpu()
+                bucket_ids = (t_cpu * N_BUCKETS // TIMESTEPS).clamp(0, N_BUCKETS - 1)
+                for b_idx in range(N_BUCKETS):
+                    mask = (bucket_ids == b_idx)
+                    if mask.any():
+                        bucket_loss_sum[b_idx]   += per_sample_mse[mask].sum().item()
+                        bucket_loss_count[b_idx] += mask.sum().item()
+
+        avg_loss  = running_loss  / n_batches
+        avg_gnorm = running_gnorm / n_batches
+
+        print(f"Epoch [{epoch:>3}/{EPOCHS}]  loss: {avg_loss:.4f}  "
+              f"grad_norm: {avg_gnorm:.4f}")
+
         csv_writer.writerow([epoch, f"{avg_loss:.6f}"])
         csv_file.flush()
+
+        gn_writer.writerow([epoch, f"{avg_gnorm:.6f}"])
+        gn_file.flush()
+
+        bucket_avgs = [
+            f"{bucket_loss_sum[i] / bucket_loss_count[i]:.6f}"
+            if bucket_loss_count[i] > 0 else "nan"
+            for i in range(N_BUCKETS)
+        ]
+        tl_writer.writerow([epoch] + bucket_avgs)
+        tl_file.flush()
 
         # ── Checkpoint ────────────────────────────────────────────────
         if epoch % cfg["save_every"] == 0 or epoch == EPOCHS:
@@ -184,7 +242,11 @@ def train(cfg: dict) -> None:
             print(f"           checkpoint saved → {ckpt_path}")
 
     csv_file.close()
-    print(f"Loss log saved → {loss_csv}")
+    gn_file.close()
+    tl_file.close()
+    print(f"Loss log saved      → {loss_csv}")
+    print(f"Grad norm log saved → {gradnorm_csv}")
+    print(f"Loss-by-t log saved → {t_loss_csv}")
     print("Training complete.")
 
 
@@ -192,7 +254,7 @@ def train(cfg: dict) -> None:
 
 def parse_args() -> dict:
     parser = argparse.ArgumentParser(
-        description="DDPM training — linear vs cosine schedule comparison (Week 3)"
+        description="DDPM training — linear vs cosine schedule comparison"
     )
     parser.add_argument("--schedule",       default=DEFAULTS["schedule"],
                         choices=SUPPORTED_SCHEDULES,
@@ -205,6 +267,12 @@ def parse_args() -> dict:
     parser.add_argument("--learning_rate",  type=float, default=DEFAULTS["learning_rate"])
     parser.add_argument("--save_every",     type=int,   default=DEFAULTS["save_every"])
     parser.add_argument("--seed",           type=int,   default=DEFAULTS["seed"])
+    parser.add_argument("--base_channels",  type=int,   default=DEFAULTS["base_channels"])
+    parser.add_argument("--use_attention",  action="store_true",
+                        help="Add self-attention at the bottleneck")
+    parser.add_argument("--dataset",                    default=DEFAULTS["dataset"],
+                        choices=SUPPORTED_DATASETS,
+                        help="Dataset to train on (default: fashionmnist)")
     parser.add_argument("--experiment_root",            default=DEFAULTS["experiment_root"])
     args = parser.parse_args()
 

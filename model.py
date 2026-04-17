@@ -158,29 +158,82 @@ class ResBlock(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# U-Net
+# Self-attention block  (bottleneck only)
 # ---------------------------------------------------------------------------
+
+class SelfAttention(nn.Module):
+    """
+    Multi-head self-attention over spatial positions.
+
+    Applied at the bottleneck (smallest spatial resolution) where the
+    receptive field of 3×3 convolutions is most limited relative to the
+    feature map size.  Global attention here lets the model reason about
+    long-range dependencies when denoising at high noise levels — the key
+    advantage that allows the cosine schedule to outperform linear.
+
+    Implementation follows Nichol & Dhariwal (2021) / lucidrains:
+      - GroupNorm before Q/K/V projections (pre-norm)
+      - Scaled dot-product attention
+      - Residual connection
+
+    Args:
+        channels:   number of input/output channels
+        num_heads:  number of attention heads (must divide channels)
+        num_groups: GroupNorm groups (must divide channels)
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4, num_groups: int = 8) -> None:
+        super().__init__()
+        assert channels % num_heads == 0, "channels must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim  = channels // num_heads
+        self.scale     = self.head_dim ** -0.5
+
+        self.norm = nn.GroupNorm(num_groups, channels)
+        self.qkv  = nn.Conv2d(channels, channels * 3, kernel_size=1, bias=False)
+        self.proj = nn.Conv2d(channels, channels,     kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        h = self.norm(x)
+
+        # Project to Q, K, V  —  each (B, C, H, W)
+        qkv = self.qkv(h).chunk(3, dim=1)
+        q, k, v = [t.reshape(B, self.num_heads, self.head_dim, H * W) for t in qkv]
+
+        # Scaled dot-product attention over spatial positions
+        attn = torch.softmax(torch.einsum("bhdi,bhdj->bhij", q, k) * self.scale, dim=-1)
+        out  = torch.einsum("bhij,bhdj->bhdi", attn, v)   # (B, heads, head_dim, HW)
+        out  = out.reshape(B, C, H, W)
+
+        return x + self.proj(out)   # residual
 
 class SmallUNet(nn.Module):
     """
     Lightweight U-Net that predicts the noise ε from a noisy image x_t and
     a timestep t.
 
-    Designed for Fashion-MNIST (B, 1, 28, 28).  The spatial resolution
-    is halved twice (28 → 14 → 7) and then restored with transposed convs.
+    Designed for Fashion-MNIST (B, 1, 28, 28) and CIFAR-10 (B, 3, 32, 32).
+    The spatial resolution is halved twice and then restored with transposed
+    convs.
 
     Args:
-        in_channels:   image channels (1 for grayscale Fashion-MNIST)
-        base_channels: channel count in the first encoder stage; subsequent
-                       stages multiply this by 2 and 4
-        time_dim:      dimensionality of the timestep embedding MLP output
+        in_channels:    image channels (1 for grayscale, 3 for RGB)
+        base_channels:  channel count in the first encoder stage; subsequent
+                        stages multiply this by 2 and 4
+        time_dim:       dimensionality of the timestep embedding MLP output
+        use_attention:  if True, insert a SelfAttention block at the bottleneck
+                        (after the ResBlock).  Enables long-range spatial
+                        reasoning needed for the cosine schedule to outperform
+                        linear on complex datasets.
     """
 
     def __init__(
         self,
-        in_channels:   int = 1,
-        base_channels: int = 32,
-        time_dim:      int = 128,
+        in_channels:   int  = 1,
+        base_channels: int  = 32,
+        time_dim:      int  = 128,
+        use_attention: bool = False,
     ) -> None:
         super().__init__()
 
@@ -190,35 +243,24 @@ class SmallUNet(nn.Module):
         self.time_embedding = TimestepEmbedding(time_dim)
 
         # ── Encoder ─────────────────────────────────────────────────────
-        # Stage 1: (B, 1, 28, 28) → (B, c, 28, 28)
-        self.enc1 = ResBlock(in_channels, c, time_dim)
-
-        # Downsample: 28 → 14  (strided conv instead of pooling keeps details)
+        self.enc1  = ResBlock(in_channels, c, time_dim)
         self.down1 = nn.Conv2d(c, c * 2, kernel_size=4, stride=2, padding=1)
-
-        # Stage 2: (B, c*2, 14, 14) → (B, c*2, 14, 14)
-        self.enc2 = ResBlock(c * 2, c * 2, time_dim)
-
-        # Downsample: 14 → 7
+        self.enc2  = ResBlock(c * 2, c * 2, time_dim)
         self.down2 = nn.Conv2d(c * 2, c * 4, kernel_size=4, stride=2, padding=1)
 
         # ── Bottleneck ───────────────────────────────────────────────────
-        # (B, c*4, 7, 7) → (B, c*4, 7, 7)
         self.bottleneck = ResBlock(c * 4, c * 4, time_dim)
+        # Optional self-attention: num_groups must divide c*4
+        self.attn = SelfAttention(c * 4, num_heads=4, num_groups=min(8, c * 4)) \
+                    if use_attention else nn.Identity()
 
         # ── Decoder ─────────────────────────────────────────────────────
-        # Upsample: 7 → 14
         self.up1  = nn.ConvTranspose2d(c * 4, c * 2, kernel_size=4, stride=2, padding=1)
-        # After concatenating the skip from enc2: c*2 + c*2 = c*4 channels in
         self.dec1 = ResBlock(c * 4, c * 2, time_dim)
-
-        # Upsample: 14 → 28
         self.up2  = nn.ConvTranspose2d(c * 2, c, kernel_size=4, stride=2, padding=1)
-        # After concatenating the skip from enc1: c + c = c*2 channels in
         self.dec2 = ResBlock(c * 2, c, time_dim)
 
         # ── Output projection ────────────────────────────────────────────
-        # 1×1 conv: (B, c, 28, 28) → (B, 1, 28, 28)
         self.out_conv = nn.Conv2d(c, in_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -236,14 +278,15 @@ class SmallUNet(nn.Module):
         t_emb = self.time_embedding(t)   # (B, time_dim)
 
         # ── Encoder ─────────────────────────────────────────────
-        e1 = self.enc1(x, t_emb)                    # (B, c,   28, 28)
-        e2 = self.enc2(self.down1(e1), t_emb)       # (B, c*2, 14, 14)
+        e1 = self.enc1(x, t_emb)
+        e2 = self.enc2(self.down1(e1), t_emb)
 
-        # ── Bottleneck ───────────────────────────────────────────
-        b  = self.bottleneck(self.down2(e2), t_emb) # (B, c*4,  7,  7)
+        # ── Bottleneck (+ optional self-attention) ───────────────
+        b  = self.bottleneck(self.down2(e2), t_emb)
+        b  = self.attn(b)               # identity when use_attention=False
 
         # ── Decoder with skip connections ────────────────────────
-        d1 = self.dec1(torch.cat([self.up1(b),  e2], dim=1), t_emb)  # (B, c*2, 14, 14)
-        d2 = self.dec2(torch.cat([self.up2(d1), e1], dim=1), t_emb)  # (B, c,   28, 28)
+        d1 = self.dec1(torch.cat([self.up1(b),  e2], dim=1), t_emb)
+        d2 = self.dec2(torch.cat([self.up2(d1), e1], dim=1), t_emb)
 
-        return self.out_conv(d2)   # (B, 1, 28, 28)
+        return self.out_conv(d2)

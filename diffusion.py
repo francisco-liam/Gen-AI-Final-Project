@@ -125,7 +125,7 @@ class GaussianDiffusion:
         return x_t, noise
 
     # ------------------------------------------------------------------
-    # Reverse denoising process  (Week 2)
+    # Reverse denoising process
     # ------------------------------------------------------------------
 
     @torch.no_grad()

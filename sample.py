@@ -1,5 +1,5 @@
 """
-sample.py — DDPM inference script  (Weeks 2-3)
+sample.py — DDPM inference script
 
 Loads a checkpoint produced by train.py, reconstructs the exact noise
 schedule used during training (linear or cosine), runs the full DDPM reverse
@@ -25,6 +25,7 @@ import torchvision.utils as vutils
 from diffusion import GaussianDiffusion
 from model     import SmallUNet
 from schedule  import get_beta_schedule
+from data      import DATASET_INFO
 
 
 # ===========================================================================
@@ -62,14 +63,18 @@ def build_model_from_checkpoint(ckpt: dict, device: torch.device) -> SmallUNet:
     """
     cfg = ckpt.get("config", {})
 
-    # Fall back to Week-1 defaults if the checkpoint pre-dates the config key
+    # Fall back to defaults if the checkpoint pre-dates the config key
     base_channels = cfg.get("base_channels", 32)
     time_dim      = cfg.get("time_dim",      128)
+    dataset       = cfg.get("dataset", "fashionmnist")
+    in_channels   = DATASET_INFO.get(dataset, {"in_channels": 1})["in_channels"]
+    use_attention = cfg.get("use_attention", False)
 
     model = SmallUNet(
-        in_channels=1,             # Fashion-MNIST is always grayscale
+        in_channels=in_channels,
         base_channels=base_channels,
         time_dim=time_dim,
+        use_attention=use_attention,
     ).to(device)
 
     model.load_state_dict(ckpt["model_state_dict"])
@@ -86,7 +91,7 @@ def build_diffusion(ckpt: dict) -> GaussianDiffusion:
     of which schedule flag is passed on the command line.
     """
     cfg       = ckpt.get("config", {})
-    schedule  = cfg.get("schedule",  "linear")   # Week 3: read from config
+    schedule  = cfg.get("schedule",  "linear")   # always read from checkpoint config
     timesteps = cfg.get("timesteps", 200)
     betas     = get_beta_schedule(schedule, timesteps)
     return GaussianDiffusion(betas)
@@ -238,7 +243,7 @@ def generate(checkpoint_path: str) -> None:
 # ===========================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="DDPM sample generator (Week 3)")
+    parser = argparse.ArgumentParser(description="DDPM sample generator")
     parser.add_argument(
         "--ckpt",
         default=CHECKPOINT_PATH,
